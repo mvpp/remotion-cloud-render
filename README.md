@@ -36,6 +36,17 @@ Google AI Ultra 20x 会员每月送 100 美元 Google Cloud 额度（Ultra 5x �
 
 不划算：一二十秒的小段试渲，本机一分钟就出来，上云还要上传、冷启动、下载。
 
+## Whisper 转写也能上云
+
+配音核对、字幕对时要跑 Whisper，本机 mlx-whisper 一个进程 3–5 GB，小内存机器同时跑两三个就卡死。`whisper/` 在同一个项目里放一台按需开关的 L4 显卡机器：没活时关机只收盘钱（50 GB 每月约 5 美元），有活时客户端自动开机（约 1 分钟），结果和 `mlx_whisper.transcribe` 同格式。30 秒配音 1 秒左右转完，10 分钟音频 19 秒；和本机比错字率 8.0% 对 8.1%，逐字时间偏差 95% 在 13 毫秒内。每次开机转一批约 0.045 美元。
+
+```bash
+PROJECT=<你的项目 ID> bash whisper/deploy_gce.sh
+python3 whisper/whisper_cloud.py voice.wav --language zh --prompt "以下是普通话的句子。"
+```
+
+细节、调用方怎么接、踩过的坑见 [references/whisper.md](references/whisper.md)。
+
 ## 怎么用
 
 先按 [references/setup.md](references/setup.md) 部署一次：领额度、建项目挂结算、设预算提醒（这几步要本人在浏览器里做），装 gcloud 和 Terraform，然后
@@ -70,6 +81,7 @@ Codex 等其他助手放进它们读 skill 的目录即可。依赖：gcloud、T
 - `scripts/build_image.sh`：Cloud Build 建镜像并部署。
 - `scripts/compare.sh`：两份视频逐帧算 PSNR 和 SSIM。
 - `references/setup.md`、`cost.md`、`results.md`：部署步骤、额度和成本、实测数据。
+- `whisper/`：Whisper 服务端、客户端、建机器脚本；`references/whisper.md`：部署、调用、实测和花费。
 
 ## 许可
 

@@ -1,6 +1,6 @@
 ---
 name: hf-cloud-render
-description: 把 HyperFrames 视频放到自己的 Google Cloud Run 上渲染：从领 Google AI Ultra 每月送的开发者额度、建项目挂结算、设预算提醒，到建镜像、部署、渲染、下载、拆除；带工程体检、一条命令渲染和画质对比脚本，以及按实测单价算出的「100 美元额度能出多少分钟片子」。Use for 云渲染、HyperFrames 上云、cloudrun 渲染、本机渲长片内存不够、用 Google Cloud 额度渲视频、AI Ultra 开发者额度能干什么。
+description: 把 HyperFrames 视频放到自己的 Google Cloud Run 上渲染，Whisper 转写放到同一个项目里按需开关的 L4 显卡机器上：从领 Google AI Ultra 每月送的开发者额度、建项目挂结算、设预算提醒，到建镜像、部署、渲染、下载、拆除；带工程体检、一条命令渲染和画质对比脚本，以及按实测单价算出的「100 美元额度能出多少分钟片子」；Whisper 那套带服务端、和 mlx-whisper 同格式的客户端、部署脚本和准确率实测。Use for 云渲染、HyperFrames 上云、cloudrun 渲染、本机渲长片内存不够、用 Google Cloud 额度渲视频、AI Ultra 开发者额度能干什么、Whisper 上云、本机转写吃内存、GPU 转写服务。
 ---
 
 # hf-cloud-render：HyperFrames 云渲染
@@ -71,6 +71,18 @@ HyperFrames 的片子本质是网页，渲染就是开一个无头 Chrome 一帧
 
 这些数的前提是画面复杂度跟我们那期差不多（HTML、SVG、GSAP 动画加几张截图和光晕）。大量模糊、粒子、WebGL 的场景渲得慢，单价会更高。先拿自己的片子渲一小段，看 `--json` 输出里的费用，再乘时长。
 
+## Whisper 转写也上云
+
+配音核对、逐字对时、字幕时间轴都要跑 Whisper，本机 mlx-whisper 一个进程占 3–5 GB，16 GB 的机器同时跑两三个就卡死。`whisper/` 是同一个项目里的一台 L4 显卡机器（Compute Engine，Spot）：没活时关机只收盘钱，有活时客户端自动开机（约 1 分钟），结果格式和 `mlx_whisper.transcribe` 一样，调用方不用改解析。
+
+实测：30 秒配音 1 秒左右转完（含上传往返 3–4 秒），10 分钟音频 19 秒；和本机 mlx-whisper 同一段比，错字率 8.0% 对 8.1%，8 段里 6 段一字不差，逐字时间偏差 95% 在 13 毫秒内。每次开机转一批约 0.045 美元，加每月约 5 美元的盘。
+
+部署、调用方怎么接、花费和坑（Cloud Run 的 GPU 配额被秒拒、按需 L4 全线缺货、镜像里没 Docker）都在 [references/whisper.md](references/whisper.md)。要点：
+
+- `PROJECT=<项目> bash whisper/deploy_gce.sh` 建好机器并写 `~/.config/whisper-cloud/config.json`；之后 `python3 whisper/whisper_cloud.py a.wav --language zh` 试一条。
+- 调用方：有那份配置就调 `whisper_cloud.transcribe`，没有就本机；`WHISPER_BACKEND=local` 强制本机。云端出错就停下报原因，不悄悄退回本机。
+- 机器没有公网端口，走 IAP 隧道，谁能用由 IAM 决定。
+
 ## 文件
 
 - `scripts/check_project.py`：上云前体检。
@@ -80,3 +92,5 @@ HyperFrames 的片子本质是网页，渲染就是开一个无头 Chrome 一帧
 - `references/setup.md`：从零开始的完整步骤和拆除方法。
 - `references/cost.md`：额度条件、单价、产出量推算。
 - `references/results.md`：实测数据。
+- `whisper/server.py`、`whisper/whisper_cloud.py`：Whisper 服务端和客户端；`whisper/deploy_gce.sh`、`whisper/gce-startup.sh`：建机器和开机脚本；`whisper/Dockerfile`、`whisper/cloudbuild.yaml`：Cloud Run 镜像（CPU 备用，或者 GPU 配额批下来以后用）。
+- `references/whisper.md`：Whisper 上云的部署、调用、实测和花费。
