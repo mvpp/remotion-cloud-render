@@ -7,7 +7,7 @@
 # Usage: PROJECT=<id> REMOTION_VERSION=<x.y.z> bash setup_gcp.sh [--dry-run]
 #   or : PROJECT=<id> bash setup_gcp.sh --from <remotion project dir>   (reads the version from its package.json)
 # Optional env: REGION (us-central1)  BUCKET (<project>-remotion-render)  JOB (remotion-render)
-#               TASK_CPU (4)  TASK_MEMORY (8Gi)  MAX_PARALLEL (10)  TASK_TIMEOUT (3600)  MAX_RETRIES (2)
+#               TASK_CPU (4)  TASK_MEMORY (8Gi)  MAX_PARALLEL (10)  TASK_TIMEOUT (3600)  MAX_RETRIES (1)
 # Re-run after changing container/ (new image tag = version + hash of container/) or the Remotion version.
 set -euo pipefail
 
@@ -30,7 +30,7 @@ BUCKET="${BUCKET:-$PROJECT-remotion-render}"
 JOB="${JOB:-remotion-render}"
 SA="remotion-render@$PROJECT.iam.gserviceaccount.com"
 TASK_CPU="${TASK_CPU:-4}"; TASK_MEMORY="${TASK_MEMORY:-8Gi}"
-MAX_PARALLEL="${MAX_PARALLEL:-10}"; TASK_TIMEOUT="${TASK_TIMEOUT:-3600}"; MAX_RETRIES="${MAX_RETRIES:-2}"
+MAX_PARALLEL="${MAX_PARALLEL:-10}"; TASK_TIMEOUT="${TASK_TIMEOUT:-3600}"; MAX_RETRIES="${MAX_RETRIES:-1}"
 HASH="$(cat "$HERE/container/Dockerfile" "$HERE/container/task.mjs" | sha256sum | cut -c1-8)"
 IMAGE="$REGION-docker.pkg.dev/$PROJECT/remotion/remotion-render:$REMOTION_VERSION-$HASH"
 G=(--project "$PROJECT")

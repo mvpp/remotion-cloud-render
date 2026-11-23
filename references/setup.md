@@ -38,7 +38,7 @@ It enables Run, Artifact Registry, Cloud Build, Storage and Logging; creates the
 `<project>-remotion-render` (private, files deleted after 7 days), the service account `remotion-render` (bucket
 access only) and the registry `remotion`; builds `remotion-render:<version>-<hash>` on Cloud Build (~1.5 min);
 and creates or updates the Cloud Run Job `remotion-render` (4 vCPU / 8 GiB per task, up to 10 tasks at once,
-1-hour task timeout, 2 retries, bucket mounted at `/mnt/render`). Settings go to
+1-hour task timeout, 1 retry, bucket mounted at `/mnt/render`). Settings go to
 `~/.config/remotion-cloud-render/config.env`.
 
 Env overrides: `REGION`, `BUCKET`, `JOB`, `TASK_CPU`, `TASK_MEMORY`, `MAX_PARALLEL`, `TASK_TIMEOUT`, `MAX_RETRIES`.

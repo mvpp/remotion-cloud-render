@@ -12,13 +12,14 @@ does the same for HyperFrames; the render engine, setup and cost model here are 
 
 A 10-minute 1080p Remotion video took 2 h 25 min on a 4-core desktop (Nov 2026, chunked local render).
 Split across cloud tasks, the wall time is the slowest slice plus ~1.5 minutes of scheduling and upload, and the
-compute bill is a few cents per minute of video. With the monthly Cloud credit included in Google AI Pro ($10),
-that covers roughly 170–250 minutes of 1080p video a month ([references/cost.md](references/cost.md)).
+compute bill is a few cents per minute of video (list price; jobs bill at least one minute per task). Cloud
+Run's jobs free tier (~15.6 task-hours a month) plus the $10 Cloud credit in Google AI Pro cover roughly six
+hours of 1080p UI-style video a month ([references/cost.md](references/cost.md)).
 
 | Measured 2026-11-23 | Frames | Wall (execution) | Compute (list price) |
 |---|---|---|---|
-| Test A, 42 s, 1080p30 | 1,274 | 3.0 min (6 tasks) | $0.039 |
-| Test B, 60 s, 1080p30 | 1,815 | 1.0 min (8 tasks); 3.5 min end to end | $0.034 |
+| Test A, 42 s, 1080p30 | 1,274 | 3.0 min (6 tasks) | $0.046 |
+| Test B, 60 s, 1080p30 | 1,815 | 1.0 min (8 tasks); 3.5 min end to end | $0.042 |
 
 Quality vs a local render of the same project: PSNR 44.2–48.2 dB, SSIM 0.993–0.996 (visually identical).
 Details: [references/results.md](references/results.md).

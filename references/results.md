@@ -6,12 +6,15 @@ for comparison: Intel i5-6500 (4 cores, 2015), 23 GB RAM, Linux.
 
 ## Renders
 
-| Render | Frames | Tasks | Waiting for tasks to start | Task run (wall) | End to end | Compute (list) |
+| Render | Frames | Tasks | Waiting for tasks to start | Task run (wall) | End to end | Compute (list, 1-min minimum) |
 |---|---|---|---|---|---|---|
-| Test A (animated charts, glow lockup), 42 s | 1,274 | 5 video + audio | 76 s (first run of the image) | 180 s | ~5 min | $0.0387 |
-| Test B (product UI captures), 60 s, run 1 | 1,815 | 7 video + audio | ~80 s | 59 s | 3 min (join failed, see below) | $0.0344 |
-| Test B, run 2 | 1,815 | 7 video + audio | ~115 s | 60 s | **210 s** | **$0.0341** |
+| Test A (animated charts, glow lockup), 42 s | 1,274 | 5 video + audio | 76 s (first run of the image) | 180 s | ~5 min | $0.046 |
+| Test B (product UI captures), 60 s, run 1 | 1,815 | 7 video + audio | ~80 s | 59 s | 3 min (join failed, see below) | $0.042 |
+| Test B, run 2 | 1,815 | 7 video + audio | ~115 s | 60 s | 210 s | $0.042 |
+| Test B, run 3 (copy edits) | 1,815 | 7 video + audio | ~30 s | 61 s | **127 s** | **$0.042** |
+| Forced failure (1 muted task, bad timeout, 3 attempts) | – | 1 | ~50 s | 195 s | exit 1 + error printed | $0.017 |
 
+All of these fit well inside the monthly jobs free tier (under 1% each), so the compute bill is $0.
 "End to end" runs from the command to a verified local MP4: check, bundle (6 s), upload (17 MB), scheduling,
 tasks, download, join, verify.
 
@@ -50,5 +53,11 @@ Both are visually identical; differences are encoder-level noise and text antial
 3. **1,811 of 1,815 frames after the audio mux.** Parts summed to 1,815 and the concat had 1,815; the wav was
    16 samples short of 60.5 s, and `-shortest` let the AAC stream's end cut 4 video frames. Fix: `-af apad -t
    <frames/fps>` instead of `-shortest`; run 2 verified 1,815/1,815.
-4. **`compare.sh` silent failure**: Remotion's bundled ffmpeg has no psnr/ssim filters. Fix: use a full ffmpeg
+4. **`cost.py` under-counted short tasks**: it billed each task's own run time. Google bills jobs for the
+   instance lifetime with a 1-minute minimum (cloud.google.com/run/pricing); the corrected figures are above
+   ($0.034 → $0.042 for Test B).
+5. **Failure log printed nothing**: task stderr reaches Cloud Logging with no severity, so `severity>=ERROR`
+   matched nothing. Fix: select the execution's `run.googleapis.com/stderr` stream. Also lowered the default
+   `MAX_RETRIES` to 1: a deterministic error burned 3 billed minutes and ~3 minutes of retry scheduling.
+6. **`compare.sh` silent failure**: Remotion's bundled ffmpeg has no psnr/ssim filters. Fix: use a full ffmpeg
    (`FFMPEG`, PATH, or `imageio-ffmpeg`).

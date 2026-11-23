@@ -5,15 +5,19 @@ Usage: cost.py <execution name> [--stats DIR] [--json OUT]
   --stats DIR   the task_*.json files task.mjs wrote (adds render seconds and frames per second per task)
   --json OUT    also save the full breakdown
 
-Billing model (Cloud Run jobs, instance time): every task bills vCPU-seconds and GiB-seconds from its
-container start to its exit. Prices are us-central1 list prices, read from the Cloud Billing Catalog API
-(service 152E-C115-5142, SKUs "Jobs CPU in us-central1" and "Jobs Memory in us-central1") on 2026-11-23;
-override with CPU_PRICE / MEM_PRICE env. Free tier, credits and retried attempts' earlier time are not
-subtracted or added: the bill can be lower (free tier) or slightly higher (retries).
+Billing model, from cloud.google.com/run/pricing (read 2026-11-23): "Cloud Run jobs are billed at the
+Instance-based billing rate, for the entire lifetime of any instance started, with a minimum of 1 minute",
+usage "rounded up to the nearest 100 millisecond". So each task bills max(60 s, its lifetime). The task's
+start→completion time from the v2 API stands in for the instance lifetime (container start-up before the task
+clock is not visible). Prices: us-central1 list, $0.000018 per vCPU-second and $0.000002 per GiB-second (same
+page and Cloud Billing Catalog SKUs "Jobs CPU/Memory in us-central1"); override with CPU_PRICE / MEM_PRICE.
+Jobs free tier: first 240,000 vCPU-seconds and 450,000 GiB-seconds per month, pooled per billing account across
+all its projects — shown as usage against it, not subtracted. Credits are not subtracted either.
 Config (project, region, job, task size) comes from ~/.config/remotion-cloud-render/config.env.
 """
 import argparse
 import json
+import math
 import os
 import subprocess
 import urllib.request
@@ -22,6 +26,13 @@ from pathlib import Path
 
 CPU_PRICE = float(os.environ.get("CPU_PRICE", "0.000018"))   # $ per vCPU-second
 MEM_PRICE = float(os.environ.get("MEM_PRICE", "0.000002"))   # $ per GiB-second
+MIN_BILLED_S = 60.0                                           # per instance
+FREE_VCPU_S, FREE_GIB_S = 240_000, 450_000                    # jobs free tier per month, per billing account
+
+
+def billed(seconds):
+    """Instance lifetime → billed seconds: rounded up to 0.1 s, at least one minute."""
+    return max(MIN_BILLED_S, math.ceil(seconds * 10) / 10)
 
 
 def load_config():
@@ -80,27 +91,31 @@ def main():
         frames = s.get("frames")
         n = frames[1] - frames[0] + 1 if frames else None
         rows.append({
-            "task": t.get("index", 0), "kind": s.get("kind", "?"), "frames": n, "billed_s": round(seconds, 1),
-            "render_s": round(s.get("renderSec", 0), 1), "fps": round(n / s["renderSec"], 2) if n and s.get("renderSec") else None,
-            "retried": t.get("retried", 0), "cost_usd": round(seconds * per_second, 5),
+            "task": t.get("index", 0), "kind": s.get("kind", "?"), "frames": n, "ran_s": round(seconds, 1),
+            "billed_s": billed(seconds), "render_s": round(s.get("renderSec", 0), 1),
+            "fps": round(n / s["renderSec"], 2) if n and s.get("renderSec") else None,
+            "retried": t.get("retried", 0), "cost_usd": round(billed(seconds) * per_second, 5),
         })
     total_s = sum(r["billed_s"] for r in rows)
     wall = (max(ends) - min(starts)).total_seconds() if starts and ends else 0
     frames = sum(r["frames"] or 0 for r in rows)
     summary = {
         "execution": args.execution, "task_size": f"{cpu:g} vCPU / {mem:g} GiB", "price_per_task_hour": round(per_second * 3600, 4),
-        "tasks": len(rows), "frames": frames, "task_seconds": round(total_s, 1), "wall_seconds": round(wall, 1),
-        "compute_usd": round(total_s * per_second, 4),
+        "tasks": len(rows), "frames": frames, "task_seconds_billed": round(total_s, 1), "wall_seconds": round(wall, 1),
+        "compute_usd_list": round(total_s * per_second, 4),
         "usd_per_1000_frames": round(total_s * per_second / frames * 1000, 4) if frames else None,
+        "free_tier_share": {"vcpu_s": round(total_s * cpu), "of_vcpu_s": FREE_VCPU_S, "gib_s": round(total_s * mem), "of_gib_s": FREE_GIB_S},
         "rows": rows,
     }
-    print(f"{'task':>4} {'kind':>5} {'frames':>6} {'billed s':>8} {'render s':>8} {'fps':>5} {'retry':>5} {'cost $':>8}")
+    print(f"{'task':>4} {'kind':>5} {'frames':>6} {'ran s':>7} {'billed s':>8} {'render s':>8} {'fps':>5} {'retry':>5} {'cost $':>8}")
     for r in rows:
-        print(f"{r['task']:>4} {r['kind']:>5} {r['frames'] or '-':>6} {r['billed_s']:>8} {r['render_s']:>8} "
+        print(f"{r['task']:>4} {r['kind']:>5} {r['frames'] or '-':>6} {r['ran_s']:>7} {r['billed_s']:>8} {r['render_s']:>8} "
               f"{r['fps'] or '-':>5} {r['retried']:>5} {r['cost_usd']:>8.4f}")
-    print(f"{summary['tasks']} tasks × {summary['task_size']} · {total_s:.0f} task-seconds · wall {wall:.0f} s · "
-          f"compute ${summary['compute_usd']:.4f} (list price, before free tier/credits)"
+    print(f"{summary['tasks']} tasks × {summary['task_size']} · {total_s:.0f} billed task-seconds (1-min minimum each) · "
+          f"wall {wall:.0f} s · ${summary['compute_usd_list']:.4f} at list price"
           + (f" · ${summary['usd_per_1000_frames']:.4f} per 1,000 frames" if frames else ""))
+    print(f"jobs free tier this uses: {total_s * cpu:,.0f} of {FREE_VCPU_S:,} vCPU-s and {total_s * mem:,.0f} of "
+          f"{FREE_GIB_S:,} GiB-s a month (pooled per billing account); inside it the bill is $0")
     if args.json:
         Path(args.json).write_text(json.dumps(summary, indent=1))
 

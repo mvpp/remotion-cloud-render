@@ -44,6 +44,8 @@ Cloud Run). Remotion's own `@remotion/cloudrun` renders on a single instance and
 - **Remotion's bundled ffmpeg is minimal** (no psnr/ssim filters); `compare.sh` uses a full ffmpeg or
   `imageio-ffmpeg`. The join itself works with Remotion's ffmpeg.
 - **`npx remotion bundle --help` runs a bundle** into `./build`; don't probe it that way.
+- A failed render prints the tasks' stderr (Cloud Logging gives it no severity, so don't filter on ERROR) and
+  exits 1. Retries default to 1: most render errors are deterministic.
 - Fresh API enablement can make Cloud Build return `PERMISSION_DENIED … serviceusage.services.use` for a few
   minutes; re-run setup.
 
@@ -53,7 +55,8 @@ Measured on 2026-11-23 (us-central1, 4 vCPU / 8 GiB tasks), see [references/resu
 and [references/cost.md](references/cost.md):
 
 - Cloud vs local quality: PSNR 44.2 dB, SSIM 0.993 over 1,274 frames (visually identical).
-- $0.019–0.030 per 1,000 1080p frames on UI and chart scenes → $10 of credit ≈ 170–250 minutes of 1080p video.
+- $0.023–0.036 per 1,000 1080p frames at list price (jobs bill ≥ 1 minute per task); the jobs free tier
+  (~15.6 task-hours a month) comes first, then the credit: ~6 hours of UI-style 1080p video a month on AI Pro.
 - One 4-vCPU task renders about as fast as a 4-core desktop; the speed-up is the parallel slices. Every
   execution also waits ~75–115 s for Cloud Run to start its tasks.
 - Mux audio with `-t <frames/fps>`, never `-shortest` (it cut 4 frames off a 1,815-frame render).

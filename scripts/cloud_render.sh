@@ -87,9 +87,12 @@ print(s.get("completionTime","-"), s.get("succeededCount",0), s.get("failedCount
   sleep 15
 done
 if [ "$FAIL" != "0" ]; then
-  echo "render failed; task errors:"
-  gcloud logging read "resource.type=cloud_run_job AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\" AND severity>=ERROR" \
-    "${G[@]}" --limit 40 --format 'value(textPayload)' | head -80
+  # Task stderr carries no severity in Cloud Logging, so select the stderr stream itself (plus platform warnings).
+  echo "render failed ($FAIL task(s)); latest task errors, oldest first:"
+  gcloud logging read "resource.type=cloud_run_job AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\" AND
+    (logName:\"run.googleapis.com%2Fstderr\" OR severity>=WARNING)" "${G[@]}" --limit 30 \
+    --format 'value(textPayload)' | tac
+  echo "full logs: gcloud logging read 'labels.\"run.googleapis.com/execution_name\"=\"$EXEC\"' --project $PROJECT"
   exit 1
 fi
 
