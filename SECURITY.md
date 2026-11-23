@@ -1,7 +1,14 @@
-# 安全说明
+# Security
 
-这个仓库不保存任何密钥。脚本用的是你本机 `gcloud` 的登录态和 Application Default Credentials，部署坐标在 `~/.hyperframes/cloudrun-state.json`，都留在你自己的电脑上，不要提交进仓库。
+This repo holds no secrets. The scripts use your local `gcloud` login. Deployment coordinates live in
+`~/.config/remotion-cloud-render/config.env` on your machine; never commit that file.
 
-渲染桶里的文件 7 天自动删除；HyperFrames 部署的 Cloud Run 服务只允许它自己的服务账号调用。额度用完后的费用会记到结算账户的付款方式上，请设预算提醒，部署时保留 `--max-instances` 上限。
+- The render bucket is private (uniform access, public access prevention) and deletes every file after 7 days.
+- Render tasks run as a dedicated service account (`remotion-render@<project>`) that can read and write that
+  bucket only. It has no other project role.
+- The Cloud Run Job has no public endpoint; only identities with `run.jobs.run` on the project can start it.
+- Spend guards: `MAX_PARALLEL` (tasks at once), `TASK_TIMEOUT` (one hour by default) and `MAX_RETRIES`. Spend
+  beyond your monthly credit is charged to the billing account's payment method, so set a budget alert if you
+  want an email warning (budgets only notify; they never stop anything).
 
-发现安全问题请在 GitHub 上开 issue，不要贴出你的项目 ID、结算账户或密钥。
+Report security problems as a GitHub issue without your project id, billing account or any key.

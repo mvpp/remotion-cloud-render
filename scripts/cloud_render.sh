@@ -1,83 +1,112 @@
 #!/usr/bin/env bash
-# 一条命令：体检 → 打包（解开软链接）→ Cloud Run 渲染 → 下载 →（可选）合音轨。
+# One command: check → bundle → upload → Cloud Run Job (frame slices + audio in parallel) → download →
+# join (ffmpeg concat -c copy) → mux audio → verify frame count → cost.
 #
-# 用法:
-#   cloud_render.sh <工程目录> [选项]
-#     --out FILE         成品路径，默认 <工程目录名>.mp4
-#     --id NAME          render-id，默认 <工程目录名>-<时间>
-#     --width W --height H   画布尺寸，默认 1920x1080（要和工程排版一致）
-#     --fps N            24 / 30 / 60，默认 30
-#     --quality Q        draft / standard / high，默认 high（CRF 15）
-#     --4k               超采样输出 4K（排版不用改）
-#     --audio FILE       下载后把这条音轨合进去（视频直接拷贝，音频转 AAC，按短的那条截齐）
-#     --skip-check       跳过体检
-#
-# 环境变量: HF_VERSION（默认 0.9.28，要和部署的镜像同版本）、MAX_PARALLEL（默认 10，不能超过部署的 --max-instances）
-# 前提: 已按 references/setup.md 部署，~/.hyperframes/cloudrun-state.json 存在，gcloud 已登录。
+# Usage: cloud_render.sh <remotion project dir> <composition id> [options]
+#   --out FILE            output mp4 (default <project>/out/<composition>.cloud.mp4)
+#   --props FILE          input props JSON (same as `remotion render --props`)
+#   --muted               no audio task, video only
+#   --tasks N             number of video slices (default: one per FRAMES_PER_TASK frames, capped by MAX_PARALLEL)
+#   --frames-per-task N   default 300
+#   --entry FILE          entry point (default src/index.ts or src/index.tsx)
+#   --env K=V             extra task env, repeatable: CONCURRENCY, JPEG_QUALITY, CRF, SCALE (2 = 4K from 1080p), X264_PRESET
+#   --id NAME             render id (default <composition>-<timestamp>)
+#   --skip-check          skip check_project.py
+# Needs: setup_gcp.sh run once (~/.config/remotion-cloud-render/config.env), gcloud logged in, Node.
 set -euo pipefail
 
-HF_VERSION="${HF_VERSION:-0.9.28}"
-MAX_PARALLEL="${MAX_PARALLEL:-10}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="${CONFIG:-$HOME/.config/remotion-cloud-render/config.env}"
+[ -f "$CONFIG" ] || { echo "no $CONFIG — run scripts/setup_gcp.sh first"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONFIG"
 
-[ $# -ge 1 ] || { sed -n 2,17p "$0"; exit 1; }
-SRC="$(cd "$1" && pwd)"; shift
-NAME="$(basename "$SRC")"
-OUT="$PWD/$NAME.mp4"; RID="$NAME-$(date +%Y%m%d%H%M%S)"
-W=1920; H=1080; FPS=30; Q=high; EXTRA=(); AUDIO=""; CHECK=1
+[ $# -ge 2 ] || { sed -n 2,17p "$0"; exit 1; }
+PROJ="$(cd "$1" && pwd)"; COMP="$2"; shift 2
+OUT="$PROJ/out/$COMP.cloud.mp4"; PROPS=""; AUDIO=1; TASKS=""; FPT=300; ENTRY=""; EXTRA=""; CHECK=1
+RID="$(echo "$COMP-$(date +%Y%m%d-%H%M%S)" | tr 'A-Z_ ' 'a-z--' | tr -cd 'a-z0-9-')"
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT="$2"; shift 2;;
+    --props) PROPS="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2;;
+    --muted) AUDIO=0; shift;;
+    --tasks) TASKS="$2"; shift 2;;
+    --frames-per-task) FPT="$2"; shift 2;;
+    --entry) ENTRY="$2"; shift 2;;
+    --env) EXTRA="$EXTRA,$2"; shift 2;;
     --id) RID="$2"; shift 2;;
-    --width) W="$2"; shift 2;;
-    --height) H="$2"; shift 2;;
-    --fps) FPS="$2"; shift 2;;
-    --quality) Q="$2"; shift 2;;
-    --4k) EXTRA+=(--output-resolution 4k); shift;;
-    --audio) AUDIO="$2"; shift 2;;
     --skip-check) CHECK=0; shift;;
-    *) echo "不认识的参数: $1"; exit 1;;
+    *) echo "unknown argument: $1"; exit 1;;
   esac
 done
 mkdir -p "$(dirname "$OUT")"; OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
-RID="$(echo "$RID" | tr 'A-Z_ ' 'a-z--' | tr -cd 'a-z0-9-')"
+G=(--project "$PROJECT")
+T0=$(date +%s)
+say() { echo "[$(date +%T)] $*"; }
 
-STATE="$HOME/.hyperframes/cloudrun-state.json"
-[ -f "$STATE" ] || { echo "没找到 $STATE，先按 references/setup.md 部署"; exit 1; }
-BUCKET="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["bucketName"])' "$STATE")"
-
-if [ "$CHECK" = 1 ]; then python3 "$HERE/check_project.py" "$SRC"; fi
-
-# 云端只认真文件：拷一份解开软链接的工程，跳过不需要上传的目录
-STAGE="$(mktemp -d)/$NAME"
-trap 'rm -rf "$(dirname "$STAGE")"' EXIT
-rsync -aL --exclude node_modules --exclude .git --exclude .hyperframes --exclude out --exclude renders "$SRC/" "$STAGE/"
-
-echo "上云渲染 $RID（${W}x${H} ${FPS}fps $Q ${EXTRA[*]:-}）…"
-t0=$(date +%s)
-JSON="$OUT.render.json"
-npx -y -p "hyperframes@$HF_VERSION" -p "@hyperframes/gcp-cloud-run@$HF_VERSION" hyperframes cloudrun render "$STAGE" \
-  --width "$W" --height "$H" --fps "$FPS" --quality "$Q" ${EXTRA[@]+"${EXTRA[@]}"} \
-  --max-parallel-chunks "$MAX_PARALLEL" --render-id "$RID" --wait --json > "$JSON"
-python3 - "$JSON" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-c = d.get("costs", {})
-print(f'{d["status"]}：{d.get("framesRendered")} 帧，按牌价约 {c.get("displayCost")}（不含存储和下载流量），{d.get("startedAt")} → {d.get("endedAt")}')
-if d["status"] != "succeeded":
-    print(json.dumps(d.get("errors"), ensure_ascii=False, indent=1)[:3000])
-    sys.exit(1)
-PY
-
-URI="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print((d.get("outputFile") or {}).get("gcsUri") or "")' "$JSON")"
-URI="${URI:-gs://$BUCKET/renders/$RID/output.mp4}"
-if [ -n "$AUDIO" ]; then
-  VID="$OUT.video.mp4"
-  gcloud storage cp "$URI" "$VID"
-  ffmpeg -v error -nostdin -y -i "$VID" -i "$AUDIO" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -ar 48000 \
-    -shortest -movflags +faststart "$OUT"
-  rm -f "$VID"
-else
-  gcloud storage cp "$URI" "$OUT"
+# Same Remotion version as the image, or the bundle and the renderer disagree.
+PV="$(node -p "require('$PROJ/node_modules/remotion/package.json').version")"
+[ "$PV" = "$REMOTION_VERSION" ] || {
+  echo "project uses remotion $PV but the job image is $REMOTION_VERSION."
+  echo "fix: PROJECT=$PROJECT bash $HERE/setup_gcp.sh --from $PROJ   (builds a $PV image and repoints the job)"; exit 1; }
+if [ -z "$ENTRY" ]; then
+  for e in src/index.ts src/index.tsx src/index.js remotion/index.ts; do [ -f "$PROJ/$e" ] && { ENTRY="$e"; break; }; done
 fi
-echo "完成：$OUT，共用时 $(( $(date +%s) - t0 )) 秒。云上那份 7 天后自动删。"
+[ -n "$ENTRY" ] || { echo "no entry point found, pass --entry"; exit 1; }
+[ "$CHECK" = 1 ] && python3 "$HERE/check_project.py" "$PROJ"
+
+STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
+say "bundling $ENTRY"
+(cd "$PROJ" && npx remotion bundle "$ENTRY" --out-dir "$STAGE/bundle" --log=error >/dev/null)
+tar -czf "$STAGE/bundle.tgz" -C "$STAGE/bundle" .
+INFO="$(node "$HERE/probe.mjs" "$PROJ" "$STAGE/bundle" "$COMP" ${PROPS:+"$PROPS"})"
+FRAMES="$(echo "$INFO" | node -pe 'JSON.parse(require("fs").readFileSync(0)).durationInFrames')"
+# Exact video length. The audio is cut/padded to it: `-shortest` let the AAC encoder's frame boundary trim the
+# last video frames (1811 of 1815 on 2026-11-23, audio 16 samples short).
+DUR="$(echo "$INFO" | node -pe 'const c = JSON.parse(require("fs").readFileSync(0)); (c.durationInFrames / c.fps).toFixed(6)')"
+if [ -z "$TASKS" ]; then
+  TASKS=$(( (FRAMES + FPT - 1) / FPT )); CAP=$(( MAX_PARALLEL - AUDIO ))
+  [ "$TASKS" -gt "$CAP" ] && TASKS=$CAP; [ "$TASKS" -lt 1 ] && TASKS=1
+fi
+say "$INFO → $TASKS video slices$([ "$AUDIO" = 1 ] && echo ' + 1 audio task'), bundle $(du -h "$STAGE/bundle.tgz" | cut -f1)"
+
+REMOTE="gs://$BUCKET/renders/$RID"
+gcloud storage cp "$STAGE/bundle.tgz" "$REMOTE/bundle.tgz" "${G[@]}" --quiet
+[ -n "$PROPS" ] && gcloud storage cp "$PROPS" "$REMOTE/props.json" "${G[@]}" --quiet
+
+EXEC="$(gcloud run jobs execute "$JOB" --region "$REGION" "${G[@]}" --async --tasks $(( TASKS + AUDIO )) \
+  --update-env-vars "RENDER_ID=$RID,COMPOSITION=$COMP,VIDEO_TASKS=$TASKS,AUDIO=$AUDIO$EXTRA" --format 'value(metadata.name)')"
+say "execution $EXEC started"
+while true; do
+  STATE="$(gcloud run jobs executions describe "$EXEC" --region "$REGION" "${G[@]}" --format json)"
+  read -r DONE OK FAIL RUN <<<"$(echo "$STATE" | python3 -c 'import json,sys
+s=json.load(sys.stdin).get("status",{})
+print(s.get("completionTime","-"), s.get("succeededCount",0), s.get("failedCount",0), s.get("runningCount",0))')"
+  say "  succeeded $OK · running $RUN · failed $FAIL / $(( TASKS + AUDIO ))"
+  [ "$DONE" != "-" ] && break
+  sleep 15
+done
+if [ "$FAIL" != "0" ]; then
+  echo "render failed; task errors:"
+  gcloud logging read "resource.type=cloud_run_job AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\" AND severity>=ERROR" \
+    "${G[@]}" --limit 40 --format 'value(textPayload)' | head -80
+  exit 1
+fi
+
+mkdir -p "$STAGE/parts" "$STAGE/stats"
+gcloud storage cp "$REMOTE/parts/*" "$STAGE/parts/" "${G[@]}" --quiet
+gcloud storage cp "$REMOTE/stats/*" "$STAGE/stats/" "${G[@]}" --quiet
+ls "$STAGE"/parts/v_*.mp4 | sort | sed "s/.*/file '&'/" > "$STAGE/list.txt"
+FF() { (cd "$PROJ" && npx remotion ffmpeg -hide_banner -loglevel error -nostdin -y "$@"); }
+FF -f concat -safe 0 -i "$STAGE/list.txt" -c copy "$STAGE/video.mp4"
+if [ "$AUDIO" = 1 ]; then
+  FF -i "$STAGE/video.mp4" -i "$STAGE/parts/audio.wav" -map 0:v -map 1:a -c:v copy -af apad -c:a aac -b:a 320k \
+    -ar 48000 -t "$DUR" -movflags +faststart "$OUT"
+else
+  FF -i "$STAGE/video.mp4" -c copy -movflags +faststart "$OUT"
+fi
+GOT="$(cd "$PROJ" && npx remotion ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$OUT" | tr -cd '0-9')"
+[ "$GOT" = "$FRAMES" ] && say "verified $GOT/$FRAMES frames" || { say "FRAME COUNT MISMATCH: $GOT vs $FRAMES"; exit 1; }
+
+python3 "$HERE/cost.py" "$EXEC" --stats "$STAGE/stats" --json "$OUT.render.json"
+say "done: $OUT ($(du -h "$OUT" | cut -f1)), $(( $(date +%s) - T0 )) s end to end. Cloud copy is deleted after 7 days."

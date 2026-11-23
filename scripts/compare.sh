@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# 两份视频逐帧比画质：PSNR 和 SSIM 的平均值、最差的 5 帧，再各截一张同一时刻的图方便肉眼看。
-# 用法: compare.sh <基准.mp4> <待比.mp4> [输出目录]
-# 帧数差 1 很正常（云端按时长向上取整出帧），按短的那份比。
+# Frame-by-frame quality check of two renders: mean PSNR and SSIM, the 5 worst frames, and one still from
+# the middle of each for a visual check.
+# Usage: compare.sh <reference.mp4> <candidate.mp4> [output dir]
+# Needs a full ffmpeg (psnr/ssim filters): $FFMPEG, else `ffmpeg` on PATH, else the static build of the
+# Python package imageio-ffmpeg (PYTHON, default python3). Remotion's bundled ffmpeg lacks these filters.
 set -euo pipefail
-[ $# -ge 2 ] || { sed -n 2,4p "$0"; exit 1; }
+[ $# -ge 2 ] || { sed -n 2,6p "$0"; exit 1; }
 A="$1"; B="$2"; DIR="${3:-compare-$(date +%H%M%S)}"
 mkdir -p "$DIR"
-ffmpeg -v error -nostdin -i "$A" -i "$B" -lavfi \
+FF="${FFMPEG:-$(command -v ffmpeg || "${PYTHON:-python3}" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())' 2>/dev/null || true)}"
+[ -n "$FF" ] || { echo "need a full ffmpeg: install one, set FFMPEG=…, or pip install imageio-ffmpeg"; exit 1; }
+"$FF" -v error -nostdin -i "$A" -i "$B" -lavfi \
   "[0:v]split[a1][a2];[1:v]split[b1][b2];[a1][b1]psnr=stats_file=$DIR/psnr.log;[a2][b2]ssim=stats_file=$DIR/ssim.log" \
   -shortest -f null - 2>/dev/null || true
 python3 - "$DIR" <<'PY'
@@ -21,12 +25,12 @@ def load(name, key):
     return rows
 p = load("psnr.log", "psnr_avg"); s = load("ssim.log", "All")
 fin = [v for _, v in p if v != float("inf")]
-print(f"比了 {len(p)} 帧")
-print(f"PSNR 平均 {sum(fin)/max(len(fin),1):.2f} dB，最差 5 帧 {sorted(p, key=lambda x: x[1])[:5]}")
-print(f"SSIM 平均 {sum(v for _, v in s)/max(len(s),1):.4f}，最差 5 帧 {sorted(s, key=lambda x: x[1])[:5]}")
-print("参考：纯背景 50 dB 上下等于没差别；文字边缘抗锯齿不同会把平均 PSNR 拉到 35–42 dB，要放大截图看字形。")
+print(f"compared {len(p)} frames")
+print(f"PSNR mean {sum(fin)/max(len(fin),1):.2f} dB, worst 5 {sorted(p, key=lambda x: x[1])[:5]}")
+print(f"SSIM mean {sum(v for _, v in s)/max(len(s),1):.4f}, worst 5 {sorted(s, key=lambda x: x[1])[:5]}")
+print("guide: ≥ 40 dB / SSIM ≥ 0.98 is visually identical; text-edge antialiasing alone can pull the mean to 35-42 dB")
 PY
-T="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$A" | awk '{print $1/2}')"
-ffmpeg -v error -nostdin -y -ss "$T" -i "$A" -frames:v 1 -q:v 2 "$DIR/a.jpg"
-ffmpeg -v error -nostdin -y -ss "$T" -i "$B" -frames:v 1 -q:v 2 "$DIR/b.jpg"
-echo "中间那一帧截图：$DIR/a.jpg、$DIR/b.jpg"
+T="$("$FF" -hide_banner -i "$A" 2>&1 | sed -n 's/.*Duration: \([0-9:.]*\).*/\1/p' | awk -F: '{print ($1*3600+$2*60+$3)/2}')"
+"$FF" -v error -nostdin -y -ss "$T" -i "$A" -frames:v 1 -q:v 2 "$DIR/a.jpg"
+"$FF" -v error -nostdin -y -ss "$T" -i "$B" -frames:v 1 -q:v 2 "$DIR/b.jpg"
+echo "middle stills: $DIR/a.jpg, $DIR/b.jpg"

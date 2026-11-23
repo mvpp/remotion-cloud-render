@@ -1,96 +1,67 @@
 ---
-name: hf-cloud-render
-description: 把 HyperFrames 视频放到自己的 Google Cloud Run 上渲染，Whisper 转写放到同一个项目里按需开关的 L4 显卡机器上：从领 Google AI Ultra 每月送的开发者额度、建项目挂结算、设预算提醒，到建镜像、部署、渲染、下载、拆除；带工程体检、一条命令渲染和画质对比脚本，以及按实测单价算出的「100 美元额度能出多少分钟片子」；Whisper 那套带服务端、和 mlx-whisper 同格式的客户端、部署脚本和准确率实测。Use for 云渲染、HyperFrames 上云、cloudrun 渲染、本机渲长片内存不够、用 Google Cloud 额度渲视频、AI Ultra 开发者额度能干什么、Whisper 上云、本机转写吃内存、GPU 转写服务。
+name: remotion-cloud-render
+description: Render Remotion videos on your own Google Cloud (Cloud Run Jobs) instead of a slow local machine — frame slices render in parallel tasks, audio in its own task, then a lossless local join. One-time setup script (bucket, service account, image via Cloud Build, job), one-command render with frame-count check and a per-render cost table, a pre-flight project check, and a PSNR/SSIM comparison against a local render. Sized for the $10–100/month Google Cloud credit that comes with Google AI Pro/Ultra. Use for "render this Remotion video in the cloud", "my machine is too slow to render", "use my Google Cloud credits to render", Cloud Run rendering, distributed Remotion rendering on GCP.
 ---
 
-# hf-cloud-render：HyperFrames 云渲染
+# remotion-cloud-render
 
-HyperFrames 的片子本质是网页，渲染就是开一个无头 Chrome 一帧帧截图再压成视频。这件事吃 CPU 和内存，跟显卡关系不大。一台 16 GB 的 Mac mini 渲 11 分钟的片子，交换区会一路涨过 5 GB，整台机器都卡住。HyperFrames 自带 `cloudrun` 命令，可以把同样的渲染丢到自己的 Google Cloud Run 上：片子切成几十块，10 台 4 核 16 GB 的机器同时渲，渲完自动拼好放进存储桶，空闲时一台机器都不留。
+A Remotion render is a headless Chrome screenshotting every frame, then an encoder. It is CPU-bound and splits
+cleanly by frame range. This skill runs those slices as parallel tasks of one **Cloud Run Job** on your own GCP
+project, renders the audio track as one more task, and joins the parts locally with `ffmpeg concat -c copy`, the
+same shape as a local `remotion render --frames=a-b --muted` loop. Nothing stays running between renders.
 
-我们在 2026 年 11 月拿一期 11 分钟的 AI 讲解片实测：整条 14 分钟渲完，按 Google 牌价算 0.89 美元；同一段跟本机逐帧比，放大四倍看不出差别。Google AI Ultra 20x 会员每月送 100 美元的 Google Cloud 额度，按这个单价，1080p 一个月够渲 1,000 分钟左右的成片。
+Fork of [garycaogan/gary-hf-cloud-render](https://github.com/garycaogan/gary-hf-cloud-render) (HyperFrames on
+Cloud Run). Remotion's own `@remotion/cloudrun` renders on a single instance and is not actively developed
+(remotion.dev/docs/cloudrun/status), so this fork uses Remotion's renderer API inside its own job instead.
 
-## 什么时候用
+## When to use
 
-适合上云的是 HyperFrames（或任何靠 Chrome 截图出帧的）工程，尤其是这几种情况：本机内存小、片子长（5 分钟以上）、想改一处就整条重渲、要出 4K、要批量渲同一个模板的很多份、本机还要同时剪别的东西。
+- Long videos, 4K, repeated full re-renders, or a machine that is busy or slow.
+- Not worth it for a 5-second check: every execution waits ~75 s for Cloud Run to schedule its tasks, plus the
+  bundle upload. Render short previews locally and send the full cut to the cloud.
 
-不适合或要先改造的：
+## Flow
 
-- 用了 WebGPU 的工程。云上没有显卡，Chrome 走 SwiftShader 软件渲染，WebGPU 不可用。WebGL 能跑但慢；纯 HTML、CSS、SVG、GSAP 最合适。
-- 工程里有软链接、本机绝对路径（`/Users/...`、`C:\...`、`file://`），或者依赖本机装的字体。云上只拿到你上传的那个文件夹，这些都会丢。字体要放进工程用 `@font-face` 引用。
-- 一二十秒的小段、改完马上要看的试渲：本机 1 分钟就出来，上云要打包上传、冷启动、再下载，不一定更快。本机适合小段试渲、拼接、混音，整条交给云。
+1. Once per project/Remotion version: `PROJECT=<id> bash scripts/setup_gcp.sh --from <remotion project>`
+   (APIs, private bucket with 7-day expiry, bucket-only service account, image on Cloud Build, job). Details and
+   teardown: [references/setup.md](references/setup.md).
+2. Each render: `bash scripts/cloud_render.sh <project dir> <composition> [--props f.json] [--out f.mp4]`.
+   It checks the project, bundles, uploads, executes, polls, downloads, joins, verifies the frame count and prints
+   the cost table (also `<out>.render.json`).
+3. Optional quality check: `bash scripts/compare.sh local.mp4 cloud.mp4`.
 
-上云前先跑 `python3 scripts/check_project.py <工程目录>`，它会查出软链接、绝对路径、WebGPU、没打包的字体和外链资源。
+## Rules learned the hard way
 
-## 操作逻辑
+- **Same Remotion version** in the project and the image; `cloud_render.sh` refuses a mismatch and prints the
+  setup command that fixes it.
+- **The Node API ignores `remotion.config.ts`.** Tasks pass h264, jpeg quality 90, `gl: swangle` and concurrency
+  = vCPUs explicitly. A project that sets `angle` (needs a GPU) still renders the same pixels on `swangle`.
+  Per-render overrides: `--env CONCURRENCY=… JPEG_QUALITY=… CRF=… X264_PRESET=… SCALE=2`.
+- **Fonts:** the image has Noto (incl. CJK and color emoji) and Liberation. Anything else must be loaded by the
+  project (`@remotion/google-fonts`, `staticFile` + FontFace). Google Fonts loads fine at render time.
+- **Uneven scenes skew the wall time**: the slowest slice sets it (one heavy lockup slice ran at 1.5 fps vs 8–10
+  for the rest). Use `--frames-per-task 150` for long videos with heavy segments.
+- **Remotion's bundled ffmpeg is minimal** (no psnr/ssim filters); `compare.sh` uses a full ffmpeg or
+  `imageio-ffmpeg`. The join itself works with Remotion's ffmpeg.
+- **`npx remotion bundle --help` runs a bundle** into `./build`; don't probe it that way.
+- Fresh API enablement can make Cloud Build return `PERMISSION_DENIED … serviceusage.services.use` for a few
+  minutes; re-run setup.
 
-完整步骤在 [references/setup.md](references/setup.md)，标了哪些必须本人在浏览器里点。大致顺序：
+## Results and cost
 
-1. 领额度（本人，浏览器）：订阅 Google AI Ultra，加入 Google Developer Program，在开发者权益页把每月 Cloud 额度领到一个结算账户上。
-2. 建项目、挂结算、设预算提醒（本人，浏览器；预算提醒也能用命令建）。
-3. 装 gcloud 和 Terraform，`gcloud auth login` 加 `gcloud auth application-default login`（会弹浏览器，本人登录）。
-4. 建镜像：npm 装的 HyperFrames 命令行建不了镜像，用 `scripts/build_image.sh` 拉同版本源码交给 Cloud Build 建，约 10 分钟。
-5. 部署：`hyperframes cloudrun deploy --image <镜像> --max-instances 10`，Terraform 建好 Cloud Run 服务、Workflows、存储桶和告警。
-6. 渲染和下载：`scripts/cloud_render.sh <工程目录>`，一条命令体检、打包（自动解开软链接）、上云渲、下载，可选合上音轨。
-7. 不用了就拆（看 setup.md 最后一节）。不拆的话空闲成本每月约 0.15 美元，只有镜像存储费。
+Measured on 2026-11-23 (us-central1, 4 vCPU / 8 GiB tasks), see [references/results.md](references/results.md)
+and [references/cost.md](references/cost.md):
 
-几条踩过的坑，命令里已经处理了：
+- Cloud vs local quality: PSNR 44.2 dB, SSIM 0.993 over 1,274 frames (visually identical).
+- $0.019–0.030 per 1,000 1080p frames on UI and chart scenes → $10 of credit ≈ 170–250 minutes of 1080p video.
+- One 4-vCPU task renders about as fast as a 4-core desktop; the speed-up is the parallel slices. Every
+  execution also waits ~75–115 s for Cloud Run to start its tasks.
+- Mux audio with `-t <frames/fps>`, never `-shortest` (it cut 4 frames off a 1,815-frame render).
 
-- `--max-parallel-chunks` 不能超过部署时的 `--max-instances`。不加这个参数，长片会被切成十几块同时发出去，超出的被 Cloud Run 回 429，整条失败、白跑。
-- 画质档：`--quality standard` 是 x264 CRF 18，`high` 是 CRF 15，本机 `hyperframes render` 默认 CRF 16。想不比本机差就用 `high`。
-- 云端按时长向上取整出帧，常比本机多 1 帧。合声音时加 `-shortest`。
-- `--output-resolution 4k` 是按 1080p 排版超采样出 4K，排版不用改。
+## Files
 
-## 实际效果
-
-数据都来自同一期片子（11 分 17 秒，1080p 30fps，20,302 帧），详见 [references/results.md](references/results.md)。
-
-画质：同一段 23 秒（695 帧）分别在 Mac mini、一台 Windows 电脑、Cloud Run 上渲，和 Mac 那份逐帧比，Windows 是 PSNR 41.6 dB、SSIM 0.993，云端是 34.9 dB、0.990。纯背景区域三处都在 51 dB 左右，跟本机自己重压一遍的误差一样；分数差全在文字边缘的抗锯齿（三个系统画字方式不同），把字幕放大四倍看，字形和位置完全一样。
-
-速度和花费：
-
-| | Mac mini 16 GB | Windows 电脑 | Cloud Run（10 台） |
-|---|---|---|---|
-| 23 秒小段 | 60 秒 | 230 秒（含首次下载 Chrome） | 41–55 秒，0.024–0.04 美元 |
-| 11 分钟整条 | 渲不了，交换区超 5 GB | 估约 57 分钟 | 14 分钟，0.89 美元 |
-| 23 秒小段出 4K | 没试 | 没试 | 142 秒，0.075 美元 |
-
-0.89 美元是 HyperFrames 按 Google 牌价算的计算费，没扣每月免费额度，也没算存储和下载流量。实际账单以 Google Cloud 计费页为准。
-
-## 100 美元额度能出多少片
-
-额度条件、单价出处和推算过程在 [references/cost.md](references/cost.md)。按实测单价，1080p 30fps 每分钟成片约 0.08 美元渲染费，加上下载到国内的流量约 0.01 美元；4K 约是 1080p 的 3 倍。扣掉每月约 0.15 美元的镜像存储，Ultra 20x 的 100 美元大约够：
-
-| 规格 | 每条成本 | 每月约能渲 |
-|---|---|---|
-| 1080p，1 分钟短片 | 0.07–0.11 美元 | 900–1,400 条 |
-| 1080p，10 分钟长片 | 约 0.9 美元 | 约 110 条（约 1,100 分钟） |
-| 4K，1 分钟短片 | 0.23–0.34 美元 | 290–430 条 |
-| 4K，10 分钟长片 | 约 2.7 美元 | 约 37 条 |
-
-这是每条只渲一遍的数。实际做片要改几轮，整条重渲两三遍很正常，按三遍算，1080p 长片一个月也有 35 条左右，对个人和小团队基本用不完。Ultra 5x 每月是 40 美元，表里的数乘 0.4；AI Pro 是 10 美元，乘 0.1。同一笔额度也能花在 Gemini API 上，两边一起用就要分着算。
-
-这些数的前提是画面复杂度跟我们那期差不多（HTML、SVG、GSAP 动画加几张截图和光晕）。大量模糊、粒子、WebGL 的场景渲得慢，单价会更高。先拿自己的片子渲一小段，看 `--json` 输出里的费用，再乘时长。
-
-## Whisper 转写也上云
-
-配音核对、逐字对时、字幕时间轴都要跑 Whisper，本机 mlx-whisper 一个进程占 3–5 GB，16 GB 的机器同时跑两三个就卡死。`whisper/` 是同一个项目里的一台 L4 显卡机器（Compute Engine，Spot）：没活时关机只收盘钱，有活时客户端自动开机（约 1 分钟），结果格式和 `mlx_whisper.transcribe` 一样，调用方不用改解析。
-
-实测：30 秒配音 1 秒左右转完（含上传往返 3–4 秒），10 分钟音频 19 秒；和本机 mlx-whisper 同一段比，错字率 8.0% 对 8.1%，8 段里 6 段一字不差，逐字时间偏差 95% 在 13 毫秒内。每次开机转一批约 0.045 美元，加每月约 5 美元的盘。
-
-部署、调用方怎么接、花费和坑（Cloud Run 的 GPU 配额被秒拒、按需 L4 全线缺货、镜像里没 Docker）都在 [references/whisper.md](references/whisper.md)。要点：
-
-- `PROJECT=<项目> bash whisper/deploy_gce.sh` 建好机器并写 `~/.config/whisper-cloud/config.json`；之后 `python3 whisper/whisper_cloud.py a.wav --language zh` 试一条。
-- 调用方：有那份配置就调 `whisper_cloud.transcribe`，没有就本机；`WHISPER_BACKEND=local` 强制本机。云端出错就停下报原因，不悄悄退回本机。
-- 机器没有公网端口，走 IAP 隧道，谁能用由 IAM 决定。
-
-## 文件
-
-- `scripts/check_project.py`：上云前体检。
-- `scripts/cloud_render.sh`：体检、打包、渲染、下载、合音轨一条命令。
-- `scripts/build_image.sh`：用 Cloud Build 建渲染镜像并部署。
-- `scripts/compare.sh`：两份视频逐帧算 PSNR 和 SSIM。
-- `references/setup.md`：从零开始的完整步骤和拆除方法。
-- `references/cost.md`：额度条件、单价、产出量推算。
-- `references/results.md`：实测数据。
-- `whisper/server.py`、`whisper/whisper_cloud.py`：Whisper 服务端和客户端；`whisper/deploy_gce.sh`、`whisper/gce-startup.sh`：建机器和开机脚本；`whisper/Dockerfile`、`whisper/cloudbuild.yaml`：Cloud Run 镜像（CPU 备用，或者 GPU 配额批下来以后用）。
-- `references/whisper.md`：Whisper 上云的部署、调用、实测和花费。
+- `container/Dockerfile`, `container/task.mjs`, `container/cloudbuild.yaml` — the render task image.
+- `scripts/setup_gcp.sh` — create/update everything on GCP; writes `~/.config/remotion-cloud-render/config.env`.
+- `scripts/cloud_render.sh` — one-command render; `scripts/probe.mjs` reads the composition length.
+- `scripts/cost.py` — per-task cost of an execution.
+- `scripts/check_project.py` — pre-flight check; `scripts/compare.sh` — PSNR/SSIM vs a local render.

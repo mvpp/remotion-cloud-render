@@ -1,44 +1,54 @@
-# 实测数据
+# Measured results (2026-11-23)
 
-2026 年 11 月 17 日测、19 日补测。测试片是一期 AI 讲解片：11 分 17 秒，1920×1080，30fps，20,302 帧，28 个场景，全部是 HyperFrames 画的 HTML、SVG、GSAP 动画，加截图、图标、半透明光晕和中英文字幕。HyperFrames 0.9.28，三处都是 Chrome 152.0.7977.30 加 SwiftShader 软件渲染（Mac 和 Windows 本机也没用上显卡）。
+Setup: project in us-central1, image `remotion-render:4.0.484` (Remotion 4.0.484, Chrome Headless Shell,
+`gl: swangle`), tasks 4 vCPU / 8 GiB, jpeg frames at quality 90, h264 at Remotion's default CRF. Local machine
+for comparison: Intel i5-6500 (4 cores, 2015), 23 GB RAM, Linux.
 
-## 画质
+## Renders
 
-同一段 c03（23 秒，695 帧）在三处各渲一份，以 Mac mini 那份为基准，用 ffmpeg 的 psnr 和 ssim 滤镜逐帧比（`scripts/compare.sh`）：
+| Render | Frames | Tasks | Waiting for tasks to start | Task run (wall) | End to end | Compute (list) |
+|---|---|---|---|---|---|---|
+| Test A (animated charts, glow lockup), 42 s | 1,274 | 5 video + audio | 76 s (first run of the image) | 180 s | ~5 min | $0.0387 |
+| Test B (product UI captures), 60 s, run 1 | 1,815 | 7 video + audio | ~80 s | 59 s | 3 min (join failed, see below) | $0.0344 |
+| Test B, run 2 | 1,815 | 7 video + audio | ~115 s | 60 s | **210 s** | **$0.0341** |
 
-| 和 Mac mini 比 | 纯背景区域 | 字幕区域 | 整帧平均 PSNR | 平均 SSIM |
-|---|---|---|---|---|
-| Windows 电脑 | 51 dB | 31 dB | 41.6 dB | 0.993 |
-| Cloud Run（high 档） | 51 dB | 23 dB | 34.9 dB | 0.990 |
+"End to end" runs from the command to a verified local MP4: check, bundle (6 s), upload (17 MB), scheduling,
+tasks, download, join, verify.
 
-Mac 那份自己重新压一遍，背景也是 50 dB 左右，所以背景可以算完全一样。分数低的部分全在文字边缘：Mac、Windows、Linux 各用各的系统组件画字，抗锯齿深浅不一样，白字压深色底的边缘像素多，分数就被拉低。把字幕和终端里的等宽字放大四倍逐像素看，三份字形、字距和位置一样。云端最差的一帧 PSNR 32.4 dB、SSIM 0.988，也在同一类文字边缘上。结论是三处肉眼看不出差别。
+Per-task speed: 5.2–12 frames/s per 4-vCPU task on the Test B video (heavier text-dense slices are the
+slow ones), 7.4–10 frames/s on Test A except its glow lockup slice at 1.5 frames/s, which alone set the
+180 s wall. Each task spends ~9–11 s outside rendering (bundle extract 0.5 s, `selectComposition` 4 s, Chrome
+start, upload). The audio task (wav, full length) took 41 s and 95 s.
 
-PSNR 34.9 dB 单看像是「明显有损」，那是因为文字边缘的差异被平均进去了；判断画质要看背景和放大对比图，不要只看一个平均分。
+## Local vs cloud speed
 
-## 速度
+The same 260-frame slice (frames 520–779) of the Test B video: **49.6 s locally** (4 cores,
+concurrency 4, including a 6 s bundle) vs **44.6 s of rendering in one cloud task**. One 4-vCPU task ≈ this
+desktop. The gain is parallelism: 7 slices + audio at once.
 
-| | 23 秒小段（695 帧） | 11 分钟整条（20,302 帧） |
-|---|---|---|
-| Mac mini（16 GB） | 60 秒，交换区峰值 4.1 GB | 没渲完：一开交换区就超过 5 GB 的安全线 |
-| Windows 电脑 | 230 秒（含第一次下载 Chrome） | 估约 57 分钟（每段固定开销约 63 秒，纯渲染 12 帧/秒） |
-| Cloud Run，10 台并发 | 41–55 秒（含上传下载约 1 分钟） | 14 分钟 |
-| Cloud Run，4K 超采样 | 142 秒 | 没跑整条 |
+- 60-s video: ~6 min locally (estimated from the slice) vs 3.5 min in the cloud, of which ~1.5–2 min is Cloud
+  Run scheduling. Short videos gain little.
+- 10-min video (a 10-minute explainer, 17,674 frames): 2 h 25 min locally on 2026-11-06. In the cloud, the 10-task cap
+  gives ~1,960 frames per slice; at that film's local rate (~2.6 frames/s) that is ~13 min of task time plus
+  ~2 min of overhead (estimate, not yet run).
 
-云端 14 分钟里包括打包上传工程（这期约 24 MB）、冷启动、渲染、拼接；下载 494 MB 成片另算，取决于网速。
+## Quality
 
-## 花费
-
-HyperFrames `--json` 输出里的 `costs.displayCost`，按 Google 牌价算 Cloud Run 计算费加 Workflows 步数：
-
-| 渲染 | 帧数 | 费用 | 每分钟成片 |
+| Comparison | Frames | PSNR mean (worst) | SSIM mean (worst) |
 |---|---|---|---|
-| 11 分钟整条，1080p high | 20,302 | 0.89 美元 | 0.079 美元 |
-| c03，1080p high（11/17） | 696 | 0.04 美元 | 0.10 美元 |
-| c03，1080p high（11/19 重测两次） | 696 | 0.024–0.025 美元 | 0.063 美元 |
-| c03，4K 超采样 high | 696 | 0.075 美元 | 0.19 美元 |
+| Test A: local render (gl `angle`) vs cloud (`swangle`) | 1,274 | 44.2 dB (42.5) | 0.993 (0.988) |
+| Test B slice 520–779: local vs cloud, both `swangle` | 260 | 48.2 dB (46.1) | 0.996 (0.994) |
 
-同一段 4K 是 1080p 的 3 倍，输出码率约 20 Mbps（1080p high 约 6–7 Mbps）。短段的单价波动大，冷启动和分块的固定开销占比高；长片摊下来更稳。
+Both are visually identical; differences are encoder-level noise and text antialiasing.
 
-这个数有三点要知道。一是它没扣 Cloud Run 每月免费额度（请求计费模式每月 18 万 vCPU 秒、36 万 GiB 秒，按牌价约值 5 美元），所以真实账单会更低。二是它不含存储桶和下载流量。三是第一次整条渲染因为没限并发、被 429 打断，HyperFrames 没算钱，但实例确实跑了，按实例时间估最多 0.7 美元。另外第一次建镜像 Cloud Build 跑了约 25 分钟，在每月免费分钟内。
+## Failures met and fixed
 
-截至写这份文档时，测试项目的计费页还没核对正式账单，上面的花费是 HyperFrames 按牌价算的估计值。核过账单以后以账单为准。
+1. **Cloud Build `PERMISSION_DENIED … serviceusage.services.use`** twice, right after enabling the API, with an
+   Owner account. A trivial `--no-source` build succeeded ~6 minutes after enablement and the real build then
+   went through. Cause: API enablement propagation. Fix: documented; re-run setup.
+2. **Frame count "mismatch: 1274 vs 1274"**: ffprobe's csv printed `1274,`. Fix: strip non-digits.
+3. **1,811 of 1,815 frames after the audio mux.** Parts summed to 1,815 and the concat had 1,815; the wav was
+   16 samples short of 60.5 s, and `-shortest` let the AAC stream's end cut 4 video frames. Fix: `-af apad -t
+   <frames/fps>` instead of `-shortest`; run 2 verified 1,815/1,815.
+4. **`compare.sh` silent failure**: Remotion's bundled ffmpeg has no psnr/ssim filters. Fix: use a full ffmpeg
+   (`FFMPEG`, PATH, or `imageio-ffmpeg`).

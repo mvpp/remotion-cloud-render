@@ -1,0 +1,10 @@
+# Built by scripts/setup_gcp.sh:
+#   gcloud builds submit container/ --config container/cloudbuild.yaml \
+#     --substitutions _IMAGE=<registry path>:<remotion version>,_REMOTION_VERSION=<remotion version>
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "--build-arg", "REMOTION_VERSION=${_REMOTION_VERSION}", "-t", "${_IMAGE}", "."]
+images: ["${_IMAGE}"]
+timeout: 1800s
+options:
+  logging: CLOUD_LOGGING_ONLY

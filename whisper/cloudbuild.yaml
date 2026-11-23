@@ -1,6 +1,0 @@
-# gcloud builds submit . --config cloudbuild.yaml --substitutions _IMAGE=<region>-docker.pkg.dev/<project>/<repo>/whisper:<tag>
-steps:
-- name: gcr.io/cloud-builders/docker
-  args: ["build", "-t", "${_IMAGE}", "."]
-images: ["${_IMAGE}"]
-timeout: 2400s
